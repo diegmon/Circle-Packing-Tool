@@ -1,0 +1,689 @@
+"""
+Circle Packing Tool V0.8.0
+Copyleft (ɔ) 2025 Diego Eguía Montiel - All Wrongs Reversed
+
+This program is free software under the GNU GPLv3.
+You are free to run it, read it, change it, and share it.
+If you improve it, just keep it free for the next person.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
+
+See the GNU General Public License for more details:
+<https://www.gnu.org/licenses/>.
+"""
+
+import math
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import re
+
+# --- Constants & Configuration ---
+UNITS = {"mm": 0.1, "cm": 1, "m": 100, "in": 2.54, "ft": 30.48}
+UNIT_LIST = ", ".join(UNITS.keys())
+
+DEBUG = False  # Set to False to disable debug output
+
+
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        print("[DEBUG]", *args, **kwargs)
+
+
+class PackingSolver:
+    """Handles the geometric calculations for circle packing."""
+
+    @staticmethod
+    def get_square_packing(w, h, d):
+        """Calculates max circles using square packing in a fixed rectangle."""
+        cols = int(w // d)
+        rows = int(h // d)
+        count = cols * rows
+        centers = [(d/2 + j*d, d/2 + i*d) for i in range(rows) for j in range(cols)]
+        return centers, count
+
+    @staticmethod
+    def get_hex_packing(w, h, d):
+        """
+        Calculates max circles using hex packing.
+        Tries both orientations and returns the better result.
+        """
+        def solve_orientation(width, height, diameter):
+            if width < diameter or height < diameter:
+                return []
+            
+            r = diameter / 2
+            dy = diameter * math.sqrt(3) / 2
+            centers = []
+            row = 0
+            y = r
+            
+            while y + r <= height + 1e-9:
+                offset = r if (row % 2 == 1) else 0
+                x = r + offset
+                
+                while x + r <= width + 1e-9:
+                    centers.append((x, y))
+                    x += diameter
+                
+                y += dy
+                row += 1
+            
+            return centers
+
+        centers_a = solve_orientation(w, h, d)
+        centers_b_raw = solve_orientation(h, w, d)
+        centers_b = [(cy, cx) for cx, cy in centers_b_raw]
+
+        if len(centers_a) >= len(centers_b):
+            return centers_a, len(centers_a)
+        else:
+            return centers_b, len(centers_b)
+
+    @staticmethod
+    def calc_min_length_square(h, d, N):
+        """Calculates min length needed for N circles in square layout."""
+        rows = int(h // d)
+        if rows == 0:
+            return None, 0, 0, 0
+        cols = math.ceil(N / rows)
+        length = cols * d
+        
+        centers = []
+        for i in range(rows):
+            for j in range(cols):
+                if len(centers) < N:
+                    centers.append((d/2 + j*d, d/2 + i*d))
+        return centers, length, rows, cols
+
+    @staticmethod
+    def calc_min_length_hex(h, d, N):
+        """
+        Calculates min length needed for N circles in hex layout.
+        Tries standard hex packing and hybrid mode (top row shifted up).
+        
+        h = fixed height (width of strip)
+        d = circle diameter
+        N = number of circles needed
+        
+        Returns: (centers, length, num_rows, num_cols)
+        """
+        if h < d:
+            return None, 0, 0, 0
+        
+        r = d / 2
+        dy = d * math.sqrt(3) / 2
+        
+        # Calculate how many rows fit in height h with hex spacing
+        max_row_index = int((h - d + 1e-9) / dy)
+        num_rows = max_row_index + 1
+        
+        debug_print(f"h={h:.2f}, d={d:.2f}, r={r:.2f}, dy={dy:.2f}")
+        debug_print(f"num_rows={num_rows}")
+        
+        if num_rows <= 0:
+            return None, 0, 0, 0
+        
+        def try_standard(start_offset, use_short_length):
+            """
+            Try standard hex packing.
+            """
+            min_cols = math.ceil(N / num_rows)
+            
+            for cols in range(min_cols, N + 2):
+                if use_short_length:
+                    length = cols * d
+                else:
+                    length = cols * d + r
+                
+                centers = []
+                for row_idx in range(num_rows):
+                    y = r + row_idx * dy
+                    
+                    if start_offset:
+                        is_offset = (row_idx % 2 == 0)
+                    else:
+                        is_offset = (row_idx % 2 == 1)
+                    
+                    offset = r if is_offset else 0
+                    
+                    for col_idx in range(cols):
+                        x = r + offset + col_idx * d
+                        if x + r <= length + 1e-9:
+                            centers.append((x, y))
+                
+                debug_print(f"Standard: start_offset={start_offset}, short={use_short_length}, cols={cols}, length={length:.2f}, positions={len(centers)}")
+                
+                if len(centers) >= N:
+                    sorted_centers = sorted(centers, key=lambda p: (p[1], p[0]))
+                    return sorted_centers[:N], length, cols
+            
+            return None, float('inf'), 0
+        
+        def try_hybrid(start_offset):
+            """
+            Try hybrid packing: hex spacing for rows 0 to (num_rows-2),
+            then top row shifted up with d spacing (parallel to row below it).
+            Use short length = cols * d.
+            """
+            if num_rows < 2:
+                return None, float('inf'), 0
+            
+            min_cols = math.ceil(N / num_rows)
+            
+            for cols in range(min_cols, N + 2):
+                length = cols * d  # Short length
+                
+                centers = []
+                
+                # Rows 0 to (num_rows - 2): standard hex spacing
+                for row_idx in range(num_rows - 1):
+                    y = r + row_idx * dy
+                    
+                    if start_offset:
+                        is_offset = (row_idx % 2 == 0)
+                    else:
+                        is_offset = (row_idx % 2 == 1)
+                    
+                    offset = r if is_offset else 0
+                    
+                    for col_idx in range(cols):
+                        x = r + offset + col_idx * d
+                        if x + r <= length + 1e-9:
+                            centers.append((x, y))
+                
+                # Top row: shifted up with d spacing, no offset (to fit in short length)
+                second_to_last_row = num_rows - 2
+                y_second_to_last = r + second_to_last_row * dy
+                y_top = y_second_to_last + d  # d spacing instead of dy
+                
+                # Check if top row fits in height
+                if y_top + r > h + 1e-9:
+                    debug_print(f"Hybrid: cols={cols}, top row doesn't fit (y_top + r = {y_top + r:.2f} > h = {h:.2f})")
+                    continue
+                
+                # Top row is no-offset to fit within short length
+                for col_idx in range(cols):
+                    x = r + col_idx * d
+                    if x + r <= length + 1e-9:
+                        centers.append((x, y_top))
+                
+                debug_print(f"Hybrid: start_offset={start_offset}, cols={cols}, length={length:.2f}, positions={len(centers)}, y_top={y_top:.2f}")
+                
+                if len(centers) >= N:
+                    sorted_centers = sorted(centers, key=lambda p: (p[1], p[0]))
+                    return sorted_centers[:N], length, cols
+            
+            return None, float('inf'), 0
+        
+        best_length = float('inf')
+        best_centers = None
+        best_cols = 0
+        best_method = ""
+        
+        # Try standard patterns
+        for start_offset in [False, True]:
+            for use_short_length in [False, True]:
+                centers, length, cols = try_standard(start_offset, use_short_length)
+                if centers is not None and length < best_length:
+                    best_length = length
+                    best_centers = centers
+                    best_cols = cols
+                    best_method = f"standard(offset={start_offset}, short={use_short_length})"
+        
+        # Try hybrid patterns
+        for start_offset in [False, True]:
+            centers, length, cols = try_hybrid(start_offset)
+            if centers is not None and length < best_length:
+                best_length = length
+                best_centers = centers
+                best_cols = cols
+                best_method = f"hybrid(offset={start_offset})"
+        
+        if best_centers is None:
+            return None, 0, 0, 0
+        
+        debug_print(f"Best method: {best_method}, length={best_length:.2f}, cols={best_cols}")
+        return best_centers, best_length, num_rows, best_cols
+
+class InputHandler:
+    """Handles unit parsing and user input."""
+    
+    @staticmethod
+    def parse_measurement(prompt):
+        while True:
+            s = input(prompt).strip()
+            if s.lower() == 'q':
+                return None, None
+            
+            m = re.match(r"^([+-]?\d*\.?\d+)\s*([a-zA-Z]*)$", s)
+            if not m:
+                print(f"Invalid format. Use number + unit (e.g., '12 m'). Units: {UNIT_LIST}.")
+                continue
+            
+            num = float(m.group(1))
+            unit = m.group(2).lower()
+            if not unit:
+                unit = 'cm'
+            
+            if unit not in UNITS:
+                print(f"Unknown unit '{unit}'. Supported: {UNIT_LIST}.")
+                continue
+            
+            if num <= 0:
+                print("Value must be positive.")
+                continue
+
+            value_cm = num * UNITS[unit]
+            return value_cm, unit
+
+
+class Plotter:
+    """Handles Matplotlib visualization."""
+    
+    @staticmethod
+    def plot_single(w, h, centers, d, title, display_unit):
+        """Plot a single layout."""
+        conv_factor = 1.0 / UNITS[display_unit]
+        d_disp = d * conv_factor
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        if centers is None:
+            ax.text(0.5, 0.5, "Infeasible", transform=ax.transAxes, ha='center')
+            ax.set_title(title, fontweight='bold')
+            plt.show()
+            return
+        
+        w_disp = w * conv_factor
+        h_disp = h * conv_factor
+        centers_disp = [(x * conv_factor, y * conv_factor) for x, y in centers]
+        
+        # utilization
+        rect_area = w * h
+        circ_area = len(centers) * math.pi * (d/2)**2
+        util = (circ_area / rect_area) * 100 if rect_area > 0 else 0
+        
+        # Draw
+        rect = patches.Rectangle((0, 0), w_disp, h_disp, linewidth=2, edgecolor='black', facecolor='none')
+        ax.add_patch(rect)
+        
+        for cx, cy in centers_disp:
+            circ = patches.Circle((cx, cy), d_disp/2, edgecolor='steelblue', facecolor='skyblue', alpha=0.6)
+            ax.add_patch(circ)
+        
+        ax.set_xlim(-d_disp, w_disp + d_disp)
+        ax.set_ylim(-d_disp, h_disp + d_disp)
+        ax.set_aspect('equal')
+        ax.set_xlabel(display_unit)
+        ax.set_ylabel(display_unit)
+        ax.set_title(
+            f"{title}\n"
+            f"Count: {len(centers)} | Util: {util:.1f}% | "
+            f"{w_disp:.1f}x{h_disp:.1f} {display_unit} | "
+            f"⌀{d_disp:.2f} {display_unit}",
+            fontweight='bold'
+        )
+        ax.grid(True, linestyle=':', alpha=0.5)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    @staticmethod
+    def plot_comparison(w1, h1, centers1, d, title1,
+                        w2, h2, centers2, title2,
+                        display_unit):
+        """Plot two layouts side by side for comparison."""
+        conv_factor = 1.0 / UNITS[display_unit]
+        d_disp = d * conv_factor
+        
+        fig = plt.figure(figsize=(12, 5))
+        
+        configs = [
+            (1, w1, h1, centers1, title1),
+            (2, w2, h2, centers2, title2)
+        ]
+        
+        # Find max width for shared x-axis scale
+        max_w = max(w1, w2) * conv_factor
+        max_h = max(h1, h2) * conv_factor
+
+        for idx, w_cm, h_cm, centers_cm, title in configs:
+            ax = fig.add_subplot(1, 2, idx)
+            
+            if centers_cm is None:
+                ax.text(0.5, 0.5, "Infeasible", transform=ax.transAxes, ha='center')
+                ax.set_title(title, fontweight='bold')
+                ax.set_xlim(-d_disp, max_w + d_disp)
+                ax.set_ylim(-d_disp, max_h + d_disp)
+                continue
+
+            w_disp = w_cm * conv_factor
+            h_disp = h_cm * conv_factor
+            centers_disp = [(x * conv_factor, y * conv_factor) for x, y in centers_cm]
+            
+            # utilization
+            rect_area = w_cm * h_cm
+            circ_area = len(centers_cm) * math.pi * (d/2)**2
+            util = (circ_area / rect_area) * 100 if rect_area > 0 else 0
+
+            # Draw
+            rect = patches.Rectangle((0, 0), w_disp, h_disp, linewidth=2, edgecolor='black', facecolor='none')
+            ax.add_patch(rect)
+            
+            for cx, cy in centers_disp:
+                circ = patches.Circle((cx, cy), d_disp/2, edgecolor='steelblue', facecolor='skyblue', alpha=0.6)
+                ax.add_patch(circ)
+            
+            # Use shared axis limits
+            ax.set_xlim(-d_disp, max_w + d_disp)
+            ax.set_ylim(-d_disp, max_h + d_disp)
+            ax.set_aspect('equal')
+            ax.set_xlabel(display_unit)
+            ax.set_ylabel(display_unit)
+            
+            ax.set_title(
+                f"{title}\n"
+                f"Count: {len(centers_cm)} | Util: {util:.1f}% | "
+                f"{w_disp:.1f}x{h_disp:.1f} {display_unit} | "
+                f"⌀{d_disp:.2f} {display_unit}",
+                fontweight='bold'
+            )
+            
+            ax.grid(True, linestyle=':', alpha=0.5)
+
+        plt.tight_layout()
+        plt.show()
+    
+    @staticmethod
+    def plot_three_way(w_sq, h_sq, centers_sq,
+                       w_hex, h_hex, centers_hex,
+                       w_hyb, h_hyb, centers_hyb,
+                       d, display_unit):
+        """Plot three layouts side by side: square, hex, hybrid."""
+        conv_factor = 1.0 / UNITS[display_unit]
+        d_disp = d * conv_factor
+        
+        fig = plt.figure(figsize=(15, 5))
+        
+        configs = [
+            (1, w_sq, h_sq, centers_sq, "Square"),
+            (2, w_hex, h_hex, centers_hex, "Hex"),
+            (3, w_hyb, h_hyb, centers_hyb, "Hybrid")
+        ]
+        
+        # Find max dimensions for shared axis scale
+        max_w = max(w_sq, w_hex, w_hyb) * conv_factor
+        max_h = max(h_sq, h_hex, h_hyb) * conv_factor
+
+        for idx, w_cm, h_cm, centers_cm, title in configs:
+            ax = fig.add_subplot(1, 3, idx)
+            
+            if centers_cm is None:
+                ax.text(0.5, 0.5, "Infeasible", transform=ax.transAxes, ha='center')
+                ax.set_title(title, fontweight='bold')
+                ax.set_xlim(-d_disp, max_w + d_disp)
+                ax.set_ylim(-d_disp, max_h + d_disp)
+                continue
+
+            w_disp = w_cm * conv_factor
+            h_disp = h_cm * conv_factor
+            centers_disp = [(x * conv_factor, y * conv_factor) for x, y in centers_cm]
+            
+            # utilization
+            rect_area = w_cm * h_cm
+            circ_area = len(centers_cm) * math.pi * (d/2)**2
+            util = (circ_area / rect_area) * 100 if rect_area > 0 else 0
+
+            # Draw
+            rect = patches.Rectangle((0, 0), w_disp, h_disp, linewidth=2, edgecolor='black', facecolor='none')
+            ax.add_patch(rect)
+            
+            for cx, cy in centers_disp:
+                circ = patches.Circle((cx, cy), d_disp/2, edgecolor='steelblue', facecolor='skyblue', alpha=0.6)
+                ax.add_patch(circ)
+            
+            # Use shared axis limits
+            ax.set_xlim(-d_disp, max_w + d_disp)
+            ax.set_ylim(-d_disp, max_h + d_disp)
+            ax.set_aspect('equal')
+            ax.set_xlabel(display_unit)
+            ax.set_ylabel(display_unit)
+            
+            ax.set_title(
+                f"{title}\n"
+                f"Count: {len(centers_cm)} | Util: {util:.1f}% | "
+                f"{w_disp:.1f}x{h_disp:.1f} {display_unit} | "
+                f"⌀{d_disp:.2f} {display_unit}",
+                fontweight='bold'
+            )
+            
+            ax.grid(True, linestyle=':', alpha=0.5)
+
+        plt.tight_layout()
+        plt.show()
+    
+    @staticmethod
+    def save_to_file(w, h, centers, d, title, display_unit, filename):
+        """Save a single layout to PNG file."""
+        conv_factor = 1.0 / UNITS[display_unit]
+        d_disp = d * conv_factor
+        
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        if centers is None:
+            ax.text(0.5, 0.5, "Infeasible", transform=ax.transAxes, ha='center')
+            ax.set_title(title, fontweight='bold')
+            fig.savefig(filename, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            return
+        
+        w_disp = w * conv_factor
+        h_disp = h * conv_factor
+        centers_disp = [(x * conv_factor, y * conv_factor) for x, y in centers]
+        
+        # utilization
+        rect_area = w * h
+        circ_area = len(centers) * math.pi * (d/2)**2
+        util = (circ_area / rect_area) * 100 if rect_area > 0 else 0
+        
+        # Draw
+        rect = patches.Rectangle((0, 0), w_disp, h_disp, linewidth=2, edgecolor='black', facecolor='none')
+        ax.add_patch(rect)
+        
+        for cx, cy in centers_disp:
+            circ = patches.Circle((cx, cy), d_disp/2, edgecolor='steelblue', facecolor='skyblue', alpha=0.6)
+            ax.add_patch(circ)
+        
+        ax.set_xlim(-d_disp, w_disp + d_disp)
+        ax.set_ylim(-d_disp, h_disp + d_disp)
+        ax.set_aspect('equal')
+        ax.set_xlabel(display_unit)
+        ax.set_ylabel(display_unit)
+        ax.set_title(
+            f"{title}\n"
+            f"Count: {len(centers)} | Util: {util:.1f}% | "
+            f"{w_disp:.1f}x{h_disp:.1f} {display_unit} | "
+            f"⌀{d_disp:.2f} {display_unit}",
+            fontweight='bold'
+        )
+        ax.grid(True, linestyle=':', alpha=0.5)
+        
+        plt.tight_layout()
+        fig.savefig(filename, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved to {filename}")
+
+def run_mode_1():
+    """Logic for Mode 1: Max circles in fixed rectangle."""
+    w_cm, unit_w = InputHandler.parse_measurement("Rectangle length: ")
+    if w_cm is None:
+        return
+    h_cm, unit_h = InputHandler.parse_measurement("Rectangle width:  ")
+    if h_cm is None:
+        return
+    d_cm, unit_d = InputHandler.parse_measurement("Circle diameter:  ")
+    if d_cm is None:
+        return
+
+    while True:
+        disp_unit = unit_w if unit_w == unit_h else 'cm'
+        if unit_w != 'cm' and unit_w == unit_d:
+            disp_unit = unit_w
+        
+        c_sq, n_sq = PackingSolver.get_square_packing(w_cm, h_cm, d_cm)
+        c_hex, n_hex = PackingSolver.get_hex_packing(w_cm, h_cm, d_cm)
+        
+        print(f"\n--- Results ---")
+        print(f"Square: {n_sq} circles")
+        print(f"Hex:    {n_hex} circles")
+        
+        Plotter.plot_comparison(w_cm, h_cm, c_sq, d_cm, "Square Packing",
+                                w_cm, h_cm, c_hex, "Hex Packing",
+                                disp_unit)
+        
+        print("\nOptions: (l) length, (w) width, (d) diameter, (q) quit mode")
+        choice = input("> ").strip().lower()
+        
+        if choice == 'q':
+            break
+        elif choice == 'l':
+            val, u = InputHandler.parse_measurement("New Length: ")
+            if val:
+                w_cm, unit_w = val, u
+        elif choice == 'w':
+            val, u = InputHandler.parse_measurement("New Width: ")
+            if val:
+                h_cm, unit_h = val, u
+        elif choice == 'd':
+            val, u = InputHandler.parse_measurement("New Diameter: ")
+            if val:
+                d_cm, unit_d = val, u
+
+
+def run_mode_2():
+    """Logic for Mode 2: Min length for fixed width and N circles."""
+    h_cm, unit_h = InputHandler.parse_measurement("Fixed Width: ")
+    if h_cm is None:
+        return
+    d_cm, unit_d = InputHandler.parse_measurement("Circle Diameter: ")
+    if d_cm is None:
+        return
+    
+    try:
+        N = int(input("Number of circles (N): "))
+    except ValueError:
+        print("Invalid integer.")
+        return
+
+    while True:
+        c_sq, l_sq, rows_sq, cols_sq = PackingSolver.calc_min_length_square(h_cm, d_cm, N)
+        c_hex, l_hex, rows_hex, cols_hex = PackingSolver.calc_min_length_hex(h_cm, d_cm, N)
+        
+        disp_unit = unit_h
+        
+        print(f"\n--- Results (N={N}) ---")
+        if c_sq:
+            print(f"Square: Length={l_sq/UNITS[disp_unit]:.2f} {disp_unit}, Rows={rows_sq}, Cols={cols_sq}")
+        else:
+            print("Square: Infeasible")
+            
+        if c_hex:
+            print(f"Hex:    Length={l_hex/UNITS[disp_unit]:.2f} {disp_unit}, Rows={rows_hex}, Cols={cols_hex}")
+        else:
+            print("Hex:    Infeasible")
+
+        print("\n--- Plot Options ---")
+        print("1) Single layout (Square)")
+        print("2) Single layout (Hex)")
+        print("3) Side by side (Square vs Hex)")
+        print("4) Save Square to PNG")
+        print("5) Save Hex to PNG")
+        print("6) Save both to PNG")
+        print("\n--- Other Options ---")
+        print("w) Change width")
+        print("d) Change diameter")
+        print("n) Change number of circles")
+        print("q) Quit mode")
+        
+        choice = input("> ").strip().lower()
+
+        if choice == 'q':
+            break
+        elif choice == '1':
+            if c_sq:
+                Plotter.plot_single(l_sq, h_cm, c_sq, d_cm, "Square Layout", disp_unit)
+            else:
+                print("Square layout is infeasible.")
+        elif choice == '2':
+            if c_hex:
+                Plotter.plot_single(l_hex, h_cm, c_hex, d_cm, "Hex Layout", disp_unit)
+            else:
+                print("Hex layout is infeasible.")
+        elif choice == '3':
+            Plotter.plot_comparison(
+                l_sq if l_sq else 0, h_cm, c_sq, d_cm, "Square Layout",
+                l_hex if l_hex else 0, h_cm, c_hex, "Hex Layout",
+                disp_unit
+            )
+        elif choice == '4':
+            if c_sq:
+                filename = f"square_N{N}_{int(l_sq)}x{int(h_cm)}.png"
+                Plotter.save_to_file(l_sq, h_cm, c_sq, d_cm, "Square Layout", disp_unit, filename)
+            else:
+                print("Square layout is infeasible.")
+        elif choice == '5':
+            if c_hex:
+                filename = f"hex_N{N}_{int(l_hex)}x{int(h_cm)}.png"
+                Plotter.save_to_file(l_hex, h_cm, c_hex, d_cm, "Hex Layout", disp_unit, filename)
+            else:
+                print("Hex layout is infeasible.")
+        elif choice == '6':
+            if c_sq:
+                filename = f"square_N{N}_{int(l_sq)}x{int(h_cm)}.png"
+                Plotter.save_to_file(l_sq, h_cm, c_sq, d_cm, "Square Layout", disp_unit, filename)
+            if c_hex:
+                filename = f"hex_N{N}_{int(l_hex)}x{int(h_cm)}.png"
+                Plotter.save_to_file(l_hex, h_cm, c_hex, d_cm, "Hex Layout", disp_unit, filename)
+            if not c_sq and not c_hex:
+                print("Both layouts are infeasible.")
+        elif choice == 'w':
+            val, u = InputHandler.parse_measurement("New Width: ")
+            if val:
+                h_cm, unit_h = val, u
+        elif choice == 'd':
+            val, u = InputHandler.parse_measurement("New Diameter: ")
+            if val:
+                d_cm, unit_d = val, u
+        elif choice == 'n':
+            try:
+                N = int(input("New N: "))
+            except ValueError:
+                print("Invalid number.")
+        else:
+            print("Invalid option.")
+
+def main():
+    print("=== Circle Packing Tool V0.8.0 ===")
+    while True:
+        print("\nSelect Mode:")
+        print("1) Max circles in fixed rectangle")
+        print("2) Calculate length for N circles")
+        print("q) Quit")
+        
+        mode = input("Mode: ").strip().lower()
+        
+        if mode == '1':
+            run_mode_1()
+        elif mode == '2':
+            run_mode_2()
+        elif mode == 'q':
+            print("Goodbye.")
+            break
+        else:
+            print("Invalid selection.")
+
+
+if __name__ == "__main__":
+    main()
